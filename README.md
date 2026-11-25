@@ -109,6 +109,22 @@ docker compose logs -f
 
 SQLite data (`./data/lucky_secretary.db`) and OAuth credentials (`./data/google_token.json`) are persisted in `./data`.
 
+## CI/CD & Deploying to Render
+
+This repository includes [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml) and [`render.yaml`](render.yaml) for automated testing and deployment on Render's Free Web Service plan:
+
+1. Run `uv run python scripts/setup_google_oauth.py` locally once to generate `./data/google_token.json`.
+2. On [Render](https://dashboard.render.com/), create a **Blueprint** (or **Web Service** using Docker) connected to `VictorNguyenLPN/lucky-secretary`, and set the secret env vars:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_ALLOWED_USER_IDS`
+   - `OPENAI_API_KEY`
+   - `GOOGLE_TOKEN_JSON` (paste the single-line JSON content of `./data/google_token.json`)
+3. In Render **Settings > Deploy Hook**, copy the Deploy Hook URL.
+4. In GitHub repository **Settings > Secrets and variables > Actions**, add `RENDER_DEPLOY_HOOK_URL`.
+5. Every push to `main` runs `pytest` + Docker build verification, then triggers Render deployment automatically.
+
+> Note: On Render's Free Web Service plan, services spin down after 15 minutes of inactivity without incoming HTTP requests on `/health`. To keep the bot online 24/7 on the Free plan, configure an external uptime monitor (e.g., UptimeRobot or cron-job.org) to ping `https://<your-render-app>.onrender.com/health` every 5–10 minutes.
+
 ---
 
 ## Usage Examples

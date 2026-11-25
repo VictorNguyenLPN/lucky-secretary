@@ -32,8 +32,9 @@ class GoogleCalendarError(Exception):
 class GoogleCalendarClient:
     """Creates Google Calendar events without blocking the asyncio event loop."""
 
-    def __init__(self, token_path: Path) -> None:
+    def __init__(self, token_path: Path, token_json: str = "") -> None:
         self._token_path = token_path
+        self._token_json = token_json
 
     async def create_event(self, event: CalendarEventRequest) -> GoogleCalendarEventResult:
         """Create an event in the user's primary Google Calendar."""
@@ -41,7 +42,7 @@ class GoogleCalendarClient:
 
     def _create_event_sync(self, event: CalendarEventRequest) -> GoogleCalendarEventResult:
         try:
-            creds = load_or_refresh_credentials(self._token_path)
+            creds = load_or_refresh_credentials(self._token_path, self._token_json)
         except GoogleAuthError as exc:
             raise GoogleCalendarError(str(exc)) from exc
 
@@ -78,7 +79,7 @@ class GoogleCalendarClient:
         event: CalendarEventRequest,
     ) -> GoogleCalendarEventResult:
         try:
-            creds = load_or_refresh_credentials(self._token_path)
+            creds = load_or_refresh_credentials(self._token_path, self._token_json)
         except GoogleAuthError as exc:
             raise GoogleCalendarError(str(exc)) from exc
 
@@ -107,7 +108,7 @@ class GoogleCalendarClient:
 
     def _delete_event_sync(self, event_id: str) -> None:
         try:
-            creds = load_or_refresh_credentials(self._token_path)
+            creds = load_or_refresh_credentials(self._token_path, self._token_json)
         except GoogleAuthError as exc:
             raise GoogleCalendarError(str(exc)) from exc
 
@@ -142,7 +143,7 @@ class GoogleCalendarClient:
         max_results: int,
     ) -> list[CalendarEventItem]:
         try:
-            creds = load_or_refresh_credentials(self._token_path)
+            creds = load_or_refresh_credentials(self._token_path, self._token_json)
         except GoogleAuthError as exc:
             raise GoogleCalendarError(str(exc)) from exc
 

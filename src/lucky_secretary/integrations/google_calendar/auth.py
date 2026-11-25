@@ -30,11 +30,23 @@ def _save_credentials(creds: Credentials, token_path: Path) -> None:
         pass
 
 
-def load_or_refresh_credentials(token_path: Path) -> Credentials:
-    """Load OAuth credentials from token_path and refresh automatically if expired."""
+def load_or_refresh_credentials(
+    token_path: Path,
+    token_json: str = "",
+) -> Credentials:
+    """Load OAuth credentials from token_path (bootstrapping from token_json if provided)."""
+    if not token_path.exists() and token_json.strip():
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token_json.strip(), encoding="utf-8")
+        try:
+            os.chmod(token_path, 0o600)
+        except OSError:
+            pass
+        logger.info("Bootstrapped Google OAuth token from GOOGLE_TOKEN_JSON.")
+
     if not token_path.exists():
         raise GoogleAuthError(
-            "Google OAuth token not found. Run scripts/setup_google_oauth.py first."
+            "Google OAuth token not found. Run scripts/setup_google_oauth.py or set GOOGLE_TOKEN_JSON."
         )
 
     try:

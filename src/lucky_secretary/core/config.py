@@ -34,9 +34,11 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8080/"
     google_token_path: Path = Path("./data/google_token.json")
+    google_token_json: str = ""
 
     # Application
     app_env: str = "development"
+    port: int | None = None
     default_timezone: str = "Asia/Ho_Chi_Minh"
     default_event_duration: int = Field(default=60, gt=0)
     confirmation_timeout_minutes: int = Field(default=15, gt=0)
@@ -58,6 +60,13 @@ class Settings(BaseSettings):
             return None
         stripped = value.strip()
         return stripped if stripped else None
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _normalize_port(cls, value: str | int | None) -> int | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return int(value)
 
     @field_validator("default_timezone")
     @classmethod
