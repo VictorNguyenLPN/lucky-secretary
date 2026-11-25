@@ -1,12 +1,11 @@
 <div align="center">
 
-<h3>Lucky Secretary</h3>
-
-<p>Personal AI secretary on Telegram</p>
-
-<img src="assets/lucky-secretary-logo.jpg" alt="Lucky Secretary" width="320" />
-
 <br/>
+
+<img src="assets/lucky-secretary-logo.jpg" alt="Lucky Secretary" width="320" style="border-radius: 100%;" />
+
+
+<h3>Lucky Secretary on Telegram</h3>
 
 [![GitHub Stars](https://img.shields.io/github/stars/VictorNguyenLPN/lucky-secretary?style=flat-square&logo=github)](https://github.com/VictorNguyenLPN/lucky-secretary/stargazers) [![GitHub Forks](https://img.shields.io/github/forks/VictorNguyenLPN/lucky-secretary?style=flat-square&logo=github)](https://github.com/VictorNguyenLPN/lucky-secretary/network/members) [![GitHub Issues](https://img.shields.io/github/issues/VictorNguyenLPN/lucky-secretary?style=flat-square&logo=github)](https://github.com/VictorNguyenLPN/lucky-secretary/issues)
 
@@ -14,7 +13,7 @@
 
 ## Features
 
-- Bilingual natural language extraction (Vietnamese & English) with relative date/time resolution.
+- Bilingual natural language extraction (Vietnamese & English) for creating, querying, updating, and deleting calendar events with relative date/time resolution.
 - Multi-turn clarification workflow when title, date, or time is missing or ambiguous.
 - Explicit event preview with **Confirm** / **Cancel** inline keyboard buttons.
 - Persistent SQLite state (`users`, `conversations`, `calendar_requests`) surviving restarts.
@@ -26,7 +25,7 @@
 
 Modular Monolith under `src/lucky_secretary/`:
 
-- `bot/`: Telegram Long Polling handlers (`/start`, `/help`, `/cancel`, text messages, inline callbacks).
+- `bot/`: Telegram Long Polling handlers (`/start`, `/help`, `/cancel`, `/clear`, text messages, inline callbacks).
 - `core/`: Config validation, prompt templates, LLM provider abstraction, and `CalendarAgent`.
 - `services/`: Conversation state machine and calendar orchestration.
 - `integrations/google_calendar/`: Google OAuth 2.0 credential refresh and Calendar API v3 `events.insert`.
@@ -126,3 +125,12 @@ SQLite data (`./data/lucky_secretary.db`) and OAuth credentials (`./data/google_
 - **English with duration:**
   - User: `Schedule a meeting tomorrow at 2 PM for 90 minutes.`
   - Bot: Displays preview for `14:00 - 15:30` and waits for confirmation.
+- **Query schedule:**
+  - User: `Ngày mai tôi có những lịch nào?`
+  - Bot: Fetches events from Google Calendar for tomorrow and replies with a formatted schedule list.
+- **Update event:**
+  - User: `Đổi lịch họp team ngày mai sang 10h.`
+  - Bot: Finds the matching event, displays `Update Event Preview`, and patches the event after confirmation.
+- **Delete event:**
+  - User: `Xóa lịch họp team ngày mai.`
+  - Bot: Finds the matching event, displays `Delete Event Preview`, and removes the event after confirmation.

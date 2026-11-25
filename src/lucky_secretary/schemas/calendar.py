@@ -72,3 +72,16 @@ class GoogleCalendarEventResult(BaseModel):
     timezone: str
     html_link: str
 
+
+class CalendarEventItem(BaseModel):
+    """Summary item for an existing Google Calendar event returned by list_events."""
+
+    event_id: str
+    summary: str
+    start_datetime: datetime | None = None
+    end_datetime: datetime | None = None
+    all_day_date: str | None = None
+    location: str | None = None
+    description: str | None = None
+    html_link: str | None = None
+

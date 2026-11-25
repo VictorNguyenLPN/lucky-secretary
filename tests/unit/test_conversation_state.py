@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from lucky_secretary.database.models import ConversationState, RequestStatus
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
+from lucky_secretary.schemas.calendar import CalendarEventItem
 from tests.conftest import make_conversation_service
 
 
@@ -205,4 +206,256 @@ async def test_unauthorized_user_cannot_confirm_another_users_request(
     attack = await service.handle_confirmation("9999", req_id, confirmed=True, now=now)
     assert "not authorized" in attack.text.lower()
     assert len(cal_client.created_events) == 0
+
+
+async def test_list_events_with_events_and_empty_schedule(repository: Repository) -> None:
+    query_tomorrow = EventExtractionResult(
+        intent=UserIntent.LIST_EVENTS,
+        start_datetime_iso="2026-11-26T00:00:00+07:00",
+        end_datetime_iso="2026-11-26T23:59:59+07:00",
+        has_explicit_date=True,
+        has_explicit_time=False,
+        missing_fields=[],
+    )
+    events = [
+        CalendarEventItem(
+            event_id="e1",
+            summary="Team Standup",
+            start_datetime=datetime.fromisoformat("2026-11-26T09:00:00+07:00"),
+            end_datetime=datetime.fromisoformat("2026-11-26T09:30:00+07:00"),
+            location="Room 201",
+        ),
+        CalendarEventItem(
+            event_id="e2",
+            summary="Company Holiday",
+            all_day_date="2026-11-26",
+        ),
+    ]
+    service, _, cal_client = make_conversation_service(
+        repository,
+        [query_tomorrow],
+        listed_events=events,
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    resp = await service.handle_user_message(
+        "1001",
+        "Ngày mai tôi có những lịch nào?",
+        now=now,
+    )
+    assert resp.reply_markup_request_id is None
+    assert "Schedule for Thursday, November 26, 2026" in resp.text
+    assert "09:00 - 09:30" in resp.text
+    assert "Team Standup" in resp.text
+    assert "Room 201" in resp.text
+    assert "All day" in resp.text
+    assert "Company Holiday" in resp.text
+    assert len(cal_client.list_queries) == 1
+
+    user = await repository.get_or_create_user("1001")
+    conv = await repository.get_conversation(user.id)
+    assert conv.state == ConversationState.IDLE
+
+    # Empty schedule case.
+    empty_service, _, _ = make_conversation_service(
+        repository,
+        [query_tomorrow],
+        listed_events=[],
+    )
+    empty_resp = await empty_service.handle_user_message(
+        "1001",
+        "Ngày mai tôi có những lịch nào?",
+        now=now,
+    )
+    assert "Schedule for Thursday, November 26, 2026" in empty_resp.text
+    assert "No events scheduled." in empty_resp.text
+
+
+async def test_update_event_preview_and_confirmation(repository: Repository) -> None:
+    existing = CalendarEventItem(
+        event_id="evt_badminton",
+        summary="Ăn tối với Ronaldo",
+        start_datetime=datetime.fromisoformat("2026-11-25T20:00:00+07:00"),
+        end_datetime=datetime.fromisoformat("2026-11-25T21:30:00+07:00"),
+        location="Nhà hàng ABC",
+    )
+    pass1_extraction = EventExtractionResult(
+        intent=UserIntent.UPDATE_EVENT,
+        target_summary="ăn tối cùng ronaldo",
+        target_date_start_iso="2026-11-25T00:00:00+07:00",
+        target_date_end_iso="2026-11-25T23:59:59+07:00",
+        has_explicit_date=True,
+        has_explicit_time=False,
+        missing_fields=[],
+    )
+    pass2_resolution = EventExtractionResult(
+        intent=UserIntent.UPDATE_EVENT,
+        target_event_id="evt_badminton",
+        target_summary="ăn tối cùng ronaldo",
+        summary="Ăn tối với Ronaldo",
+        start_datetime_iso="2026-11-26T20:00:00+07:00",
+        end_datetime_iso="2026-11-26T21:30:00+07:00",
+        has_explicit_date=True,
+        has_explicit_time=True,
+        missing_fields=[],
+    )
+    service, llm, cal_client = make_conversation_service(
+        repository,
+        [pass1_extraction, pass2_resolution],
+        listed_events=[existing],
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    preview = await service.handle_user_message(
+        "1001",
+        "đổi lịch ăn tối cùng ronaldo tối nay sang ngày mai, cùng giờ",
+        now=now,
+    )
+    assert len(llm.calls) == 2
+    assert "Candidate events from user's Google Calendar" in llm.calls[1][1]
+    assert "Update Event Preview" in preview.text
+    assert "Ăn tối với Ronaldo" in preview.text
+    assert "20:00 - 21:30" in preview.text
+    assert "Nhà hàng ABC" in preview.text
+    assert preview.reply_markup_request_id is not None
+    assert len(cal_client.updated_events) == 0
+
+    confirm_resp = await service.handle_confirmation(
+        "1001",
+        preview.reply_markup_request_id,
+        confirmed=True,
+        now=now + timedelta(seconds=10),
+    )
+    assert "Event updated successfully!" in confirm_resp.text
+    assert len(cal_client.updated_events) == 1
+    assert cal_client.updated_events[0][0] == "evt_badminton"
+    assert cal_client.updated_events[0][1].duration_minutes == 90
+
+
+async def test_delete_event_preview_and_confirmation(repository: Repository) -> None:
+    existing = CalendarEventItem(
+        event_id="evt_del",
+        summary="Chơi cầu lông",
+        start_datetime=datetime.fromisoformat("2026-11-26T18:00:00+07:00"),
+        end_datetime=datetime.fromisoformat("2026-11-26T20:00:00+07:00"),
+    )
+    extraction = EventExtractionResult(
+        intent=UserIntent.DELETE_EVENT,
+        target_event_id="evt_del",
+        target_summary="cầu lông",
+        target_date_start_iso="2026-11-26T00:00:00+07:00",
+        target_date_end_iso="2026-11-26T23:59:59+07:00",
+        has_explicit_date=True,
+        has_explicit_time=False,
+        missing_fields=[],
+    )
+    service, _, cal_client = make_conversation_service(
+        repository,
+        [extraction],
+        listed_events=[existing],
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    preview = await service.handle_user_message(
+        "1001",
+        "Xóa lịch chơi cầu lông ngày mai.",
+        now=now,
+    )
+    assert "Delete Event Preview" in preview.text
+    assert "Chơi cầu lông" in preview.text
+    assert preview.reply_markup_request_id is not None
+    assert len(cal_client.deleted_event_ids) == 0
+
+    confirm_resp = await service.handle_confirmation(
+        "1001",
+        preview.reply_markup_request_id,
+        confirmed=True,
+        now=now + timedelta(seconds=10),
+    )
+    assert "Event deleted successfully!" in confirm_resp.text
+    assert cal_client.deleted_event_ids == ["evt_del"]
+
+
+async def test_unsupported_query_and_event_not_found_notices(repository: Repository) -> None:
+    unsupported = EventExtractionResult(
+        intent=UserIntent.OTHER,
+        missing_fields=[],
+    )
+    not_found_delete = EventExtractionResult(
+        intent=UserIntent.DELETE_EVENT,
+        target_summary="không tồn tại",
+        target_date_start_iso="2026-11-26T00:00:00+07:00",
+        target_date_end_iso="2026-11-26T23:59:59+07:00",
+        has_explicit_date=True,
+        missing_fields=[],
+    )
+    service, _, _ = make_conversation_service(
+        repository,
+        [unsupported, not_found_delete],
+        listed_events=[],
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    resp_other = await service.handle_user_message("1001", "gửi email giúp tôi", now=now)
+    assert "<b>Unsupported Request</b>" in resp_other.text
+    assert "<b>Supported capabilities</b>" in resp_other.text
+
+    resp_missing = await service.handle_user_message(
+        "1001",
+        "xóa lịch không tồn tại ngày mai",
+        now=now + timedelta(seconds=5),
+    )
+    assert "<b>Event Not Found</b>" in resp_missing.text
+
+
+async def test_batch_delete_all_events_in_week(repository: Repository) -> None:
+    weekly_events = [
+        CalendarEventItem(
+            event_id="w1",
+            summary="Họp đầu tuần",
+            start_datetime=datetime.fromisoformat("2026-11-23T09:00:00+07:00"),
+            end_datetime=datetime.fromisoformat("2026-11-23T10:00:00+07:00"),
+        ),
+        CalendarEventItem(
+            event_id="w2",
+            summary="Chơi cầu lông",
+            start_datetime=datetime.fromisoformat("2026-11-26T18:00:00+07:00"),
+            end_datetime=datetime.fromisoformat("2026-11-26T20:00:00+07:00"),
+        ),
+    ]
+    extraction = EventExtractionResult(
+        intent=UserIntent.DELETE_EVENT,
+        delete_all_in_range=True,
+        target_date_start_iso="2026-11-23T00:00:00+07:00",
+        target_date_end_iso="2026-11-29T23:59:59+07:00",
+        has_explicit_date=True,
+        missing_fields=[],
+    )
+    service, llm, cal_client = make_conversation_service(
+        repository,
+        [extraction],
+        listed_events=weekly_events,
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    preview = await service.handle_user_message(
+        "1001",
+        "xóa toàn bộ lịch trong tuần",
+        now=now,
+    )
+    assert len(llm.calls) == 1
+    assert "<b>Delete Events Preview (2 events)</b>" in preview.text
+    assert "Họp đầu tuần" in preview.text
+    assert "Chơi cầu lông" in preview.text
+    assert preview.reply_markup_request_id is not None
+    assert cal_client.deleted_event_ids == []
+
+    confirm_resp = await service.handle_confirmation(
+        "1001",
+        preview.reply_markup_request_id,
+        confirmed=True,
+        now=now + timedelta(seconds=10),
+    )
+    assert "<b>Events deleted successfully! (2 events)</b>" in confirm_resp.text
+    assert cal_client.deleted_event_ids == ["w1", "w2"]
 
