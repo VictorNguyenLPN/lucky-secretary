@@ -1,0 +1,11 @@
+services:
+  lucky-secretary:
+    build: .
+    container_name: lucky-secretary
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    stop_grace_period: 15s
+
