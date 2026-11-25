@@ -33,6 +33,7 @@ from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarClient
 from lucky_secretary.services.calendar_service import CalendarService
 from lucky_secretary.services.conversation_service import ConversationService
+from lucky_secretary.utils.health import HealthCheckServer
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,10 @@ def build_application(settings: Settings, db: DatabaseManager) -> Application:
         default_timezone=settings.default_timezone,
         default_duration_minutes=settings.default_event_duration,
     )
-    calendar_client = GoogleCalendarClient(token_path=settings.google_token_path)
+    calendar_client = GoogleCalendarClient(
+        token_path=settings.google_token_path,
+        token_json=settings.google_token_json,
+    )
     calendar_service = CalendarService(calendar_client)
     conversation_service = ConversationService(
         repository=repo,
@@ -71,12 +75,17 @@ def build_application(settings: Settings, db: DatabaseManager) -> Application:
         default_duration_minutes=settings.default_event_duration,
         confirmation_timeout_minutes=settings.confirmation_timeout_minutes,
     )
+    health_server = HealthCheckServer(port=settings.port) if settings.port is not None else None
 
     async def _post_init(app: Application) -> None:
         await db.init_db()
         logger.info("Database initialized at %s", settings.sqlite_path)
+        if health_server is not None:
+            await health_server.start()
 
     async def _post_shutdown(app: Application) -> None:
+        if health_server is not None:
+            await health_server.stop()
         await db.close()
         logger.info("Lucky Secretary shutdown complete.")
 

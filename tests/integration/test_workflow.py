@@ -23,6 +23,7 @@ from lucky_secretary.integrations.google_calendar.auth import load_or_refresh_cr
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarClient
 from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
 from lucky_secretary.schemas.calendar import CalendarEventRequest
+from lucky_secretary.utils.health import HealthCheckServer
 from tests.conftest import make_conversation_service
 
 
@@ -381,4 +382,41 @@ async def test_clear_command_handler(repository: Repository) -> None:
     bot.send_message.assert_awaited_once()
     sent_text = bot.send_message.call_args.kwargs["text"]
     assert "Chat history cleared." in sent_text
+
+
+def test_load_or_refresh_credentials_bootstraps_from_token_json(tmp_path: Path) -> None:
+    token_path = tmp_path / "nested" / "google_token.json"
+    token_json = json.dumps({"token": "bootstrapped-token", "refresh_token": "rt"})
+
+    mock_creds = MagicMock()
+    mock_creds.valid = True
+
+    with patch(
+        "lucky_secretary.integrations.google_calendar.auth.Credentials.from_authorized_user_file",
+        return_value=mock_creds,
+    ) as mock_loader:
+        creds = load_or_refresh_credentials(token_path, token_json=token_json)
+
+    assert creds is mock_creds
+    assert token_path.exists()
+    assert json.loads(token_path.read_text(encoding="utf-8"))["token"] == "bootstrapped-token"
+    mock_loader.assert_called_once()
+
+
+async def test_health_check_server_responds_ok() -> None:
+    import asyncio
+
+    server = HealthCheckServer(port=0, host="127.0.0.1")
+    await server.start()
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        assert response.startswith(b"HTTP/1.1 200 OK")
+        assert response.endswith(b'{"status":"ok"}')
+    finally:
+        await server.stop()
 
