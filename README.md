@@ -2,7 +2,7 @@
 
 <br/>
 
-<img src="assets/lucky-secretary-logo.jpg" alt="Lucky Secretary" width="320" style="border-radius: 100%;" />
+<img src="assets/lucky-secretary-logo.png" alt="Lucky Secretary" width="320" />
 
 
 <h3>Lucky Secretary on Telegram</h3>
