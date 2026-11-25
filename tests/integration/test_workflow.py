@@ -9,7 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from lucky_secretary.bot.handlers.callback import confirmation_callback_handler
-from lucky_secretary.bot.handlers.command import help_command, start_command
+from lucky_secretary.bot.handlers.command import (
+    clear_command,
+    help_command,
+    start_command,
+    unknown_command,
+)
 from lucky_secretary.bot.handlers.message import text_message_handler
 from lucky_secretary.core.config import Settings
 from lucky_secretary.database.connection import DatabaseManager
@@ -197,4 +202,183 @@ async def test_telegram_handlers_authorization_and_flow(repository: Repository) 
 
     assert len(cal_client.created_events) == 1
     assert "Event created successfully!" in query.edit_message_text.call_args.kwargs["text"]
+
+
+async def test_google_calendar_client_list_events_parses_timed_and_all_day(
+    tmp_path: Path,
+) -> None:
+    token_path = tmp_path / "token.json"
+    client = GoogleCalendarClient(token_path=token_path)
+
+    mock_list_call = MagicMock()
+    mock_list_call.execute.return_value = {
+        "items": [
+            {
+                "id": "evt_1",
+                "summary": "Morning Sync",
+                "location": "Online",
+                "start": {"dateTime": "2026-11-26T09:00:00+07:00"},
+                "end": {"dateTime": "2026-11-26T10:00:00+07:00"},
+                "htmlLink": "https://calendar.google.com/event?eid=evt_1",
+            },
+            {
+                "id": "evt_2",
+                "summary": "Offsite Day",
+                "start": {"date": "2026-11-26"},
+                "end": {"date": "2026-11-27"},
+            },
+        ]
+    }
+    mock_events = MagicMock()
+    mock_events.list.return_value = mock_list_call
+    mock_service = MagicMock()
+    mock_service.events.return_value = mock_events
+
+    time_min = datetime.fromisoformat("2026-11-26T00:00:00+07:00")
+    time_max = datetime.fromisoformat("2026-11-26T23:59:59+07:00")
+
+    with (
+        patch(
+            "lucky_secretary.integrations.google_calendar.client.load_or_refresh_credentials",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "lucky_secretary.integrations.google_calendar.client.build",
+            return_value=mock_service,
+        ),
+    ):
+        items = await client.list_events(time_min=time_min, time_max=time_max)
+
+    mock_events.list.assert_called_once_with(
+        calendarId="primary",
+        timeMin=time_min.isoformat(),
+        timeMax=time_max.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+        maxResults=20,
+    )
+    assert len(items) == 2
+    assert items[0].summary == "Morning Sync"
+    assert items[0].start_datetime == datetime.fromisoformat("2026-11-26T09:00:00+07:00")
+    assert items[0].location == "Online"
+    assert items[1].summary == "Offsite Day"
+    assert items[1].all_day_date == "2026-11-26"
+
+
+async def test_google_calendar_client_update_and_delete_event(tmp_path: Path) -> None:
+    token_path = tmp_path / "token.json"
+    client = GoogleCalendarClient(token_path=token_path)
+    event = CalendarEventRequest(
+        summary="Updated Meeting",
+        start_datetime=datetime(2026, 11, 27, 10, 0),
+        duration_minutes=60,
+        timezone="Asia/Ho_Chi_Minh",
+    )
+
+    mock_patch = MagicMock()
+    mock_patch.execute.return_value = {
+        "id": "evt_up",
+        "summary": "Updated Meeting",
+        "htmlLink": "https://calendar.google.com/event?eid=evt_up",
+        "start": {"dateTime": "2026-11-27T10:00:00+07:00"},
+        "end": {"dateTime": "2026-11-27T11:00:00+07:00"},
+    }
+    mock_delete = MagicMock()
+    mock_delete.execute.return_value = None
+
+    mock_events = MagicMock()
+    mock_events.patch.return_value = mock_patch
+    mock_events.delete.return_value = mock_delete
+    mock_service = MagicMock()
+    mock_service.events.return_value = mock_events
+
+    with (
+        patch(
+            "lucky_secretary.integrations.google_calendar.client.load_or_refresh_credentials",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "lucky_secretary.integrations.google_calendar.client.build",
+            return_value=mock_service,
+        ),
+    ):
+        updated = await client.update_event("evt_up", event)
+        await client.delete_event("evt_up")
+
+    assert updated.event_id == "evt_up"
+    assert updated.summary == "Updated Meeting"
+    mock_events.patch.assert_called_once()
+    assert mock_events.patch.call_args.kwargs["eventId"] == "evt_up"
+    mock_events.delete.assert_called_once_with(calendarId="primary", eventId="evt_up")
+
+
+async def test_unknown_command_handler(repository: Repository) -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        telegram_bot_token="123:ABC",
+        telegram_allowed_user_ids="42",
+        openai_api_key="sk-test",
+    )
+    context = SimpleNamespace(bot_data={"settings": settings})
+
+    unauth_msg = MagicMock()
+    unauth_msg.reply_text = AsyncMock()
+    await unknown_command(
+        SimpleNamespace(effective_user=SimpleNamespace(id=999), message=unauth_msg),
+        context,  # type: ignore[arg-type]
+    )
+    unauth_msg.reply_text.assert_awaited_once_with("Unauthorized access.")
+
+    auth_msg = MagicMock()
+    auth_msg.reply_text = AsyncMock()
+    await unknown_command(
+        SimpleNamespace(effective_user=SimpleNamespace(id=42), message=auth_msg),
+        context,  # type: ignore[arg-type]
+    )
+    reply_text = auth_msg.reply_text.call_args.args[0]
+    assert "<b>Unsupported Command</b>" in reply_text
+    assert "<b>Available commands</b>" in reply_text
+
+
+async def test_clear_command_handler(repository: Repository) -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        telegram_bot_token="123:ABC",
+        telegram_allowed_user_ids="42",
+        openai_api_key="sk-test",
+    )
+    service, _, _ = make_conversation_service(repository, [])
+    bot = MagicMock()
+    bot.delete_messages = AsyncMock(return_value=True)
+    bot.send_message = AsyncMock()
+    context = SimpleNamespace(
+        bot=bot,
+        bot_data={"settings": settings, "conversation_service": service},
+    )
+
+    unauth_msg = MagicMock()
+    unauth_msg.reply_text = AsyncMock()
+    await clear_command(
+        SimpleNamespace(effective_user=SimpleNamespace(id=999), message=unauth_msg),
+        context,  # type: ignore[arg-type]
+    )
+    unauth_msg.reply_text.assert_awaited_once_with("Unauthorized access.")
+    bot.delete_messages.assert_not_awaited()
+
+    auth_msg = SimpleNamespace(message_id=250)
+    await clear_command(
+        SimpleNamespace(
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=42),
+            message=auth_msg,
+        ),
+        context,  # type: ignore[arg-type]
+    )
+    assert bot.delete_messages.await_count == 3  # 250..1 in chunks of 100 (100, 100, 50)
+    first_chunk = bot.delete_messages.await_args_list[0].kwargs["message_ids"]
+    assert first_chunk[0] == 250
+    assert len(first_chunk) == 100
+    bot.send_message.assert_awaited_once()
+    sent_text = bot.send_message.call_args.kwargs["text"]
+    assert "Chat history cleared." in sent_text
 

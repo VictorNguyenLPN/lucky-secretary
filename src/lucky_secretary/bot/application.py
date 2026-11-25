@@ -17,7 +17,13 @@ from telegram.ext import (
 )
 
 from lucky_secretary.bot.handlers.callback import confirmation_callback_handler
-from lucky_secretary.bot.handlers.command import cancel_command, help_command, start_command
+from lucky_secretary.bot.handlers.command import (
+    cancel_command,
+    clear_command,
+    help_command,
+    start_command,
+    unknown_command,
+)
 from lucky_secretary.bot.handlers.message import text_message_handler
 from lucky_secretary.core.agent import CalendarAgent
 from lucky_secretary.core.config import Settings
@@ -94,8 +100,10 @@ def build_application(settings: Settings, db: DatabaseManager) -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CallbackQueryHandler(confirmation_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     application.add_error_handler(_error_handler)
 
     return application
