@@ -31,6 +31,7 @@ from lucky_secretary.core.llm.openai_provider import OpenAIProvider
 from lucky_secretary.database.connection import DatabaseManager
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarClient
+from lucky_secretary.integrations.web_search.client import TavilySearchClient
 from lucky_secretary.services.calendar_service import CalendarService
 from lucky_secretary.services.conversation_service import ConversationService
 from lucky_secretary.utils.health import HealthCheckServer
@@ -67,10 +68,19 @@ def build_application(settings: Settings, db: DatabaseManager) -> Application:
         token_json=settings.google_token_json,
     )
     calendar_service = CalendarService(calendar_client)
+    web_search_client = (
+        TavilySearchClient(
+            api_key=settings.tavily_api_key,
+            max_results=settings.tavily_max_results,
+        )
+        if settings.tavily_api_key.strip()
+        else None
+    )
     conversation_service = ConversationService(
         repository=repo,
         agent=agent,
         calendar_service=calendar_service,
+        web_search_client=web_search_client,
         default_timezone=settings.default_timezone,
         default_duration_minutes=settings.default_event_duration,
         confirmation_timeout_minutes=settings.confirmation_timeout_minutes,

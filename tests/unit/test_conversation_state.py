@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 from lucky_secretary.database.models import ConversationState, RequestStatus
 from lucky_secretary.database.repository import Repository
+from lucky_secretary.integrations.web_search.client import WebSearchResult
 from lucky_secretary.schemas.agent import EventExtractionResult, ExtractedEventItem, UserIntent
 from lucky_secretary.schemas.calendar import CalendarEventItem
-from tests.conftest import make_conversation_service
+from tests.conftest import FakeWebSearchClient, make_conversation_service
 
 
 async def test_state_transition_clarification_to_preview_to_completed(
@@ -725,4 +726,52 @@ async def test_batch_create_multiple_events_with_clarification(
     assert len(cal_client.created_events) == 2
     assert cal_client.created_events[0].start_datetime.day == 28
     assert cal_client.created_events[1].start_datetime.day == 30
+
+
+async def test_general_chat_with_tavily_web_search(repository: Repository) -> None:
+    pass1 = EventExtractionResult(
+        intent=UserIntent.GENERAL_CHAT,
+        needs_web_search=True,
+        search_query="Ho Chi Minh City weather tomorrow",
+    )
+    pass2 = EventExtractionResult(
+        intent=UserIntent.GENERAL_CHAT,
+        needs_web_search=False,
+        reply_text="Ngày mai TP.HCM có nắng nhẹ, ít khả năng mưa daddy nhé.",
+    )
+    fake_web = FakeWebSearchClient(
+        results=[
+            WebSearchResult(
+                title="HCMC Weather Forecast",
+                url="https://example.com/weather",
+                content="Partly cloudy, 26-33C, 10% rain.",
+            )
+        ]
+    )
+    service, llm, _ = make_conversation_service(
+        repository,
+        [pass1, pass2],
+        web_search_client=fake_web,
+    )
+    now = datetime(2026, 11, 26, 3, 50, tzinfo=timezone.utc)
+
+    resp = await service.handle_user_message("1001", "Ngày mai Sài Gòn có mưa không?", now=now)
+    assert fake_web.queries == ["Ho Chi Minh City weather tomorrow"]
+    assert "Web search results" in llm.calls[1][1]
+    assert "nắng nhẹ" in resp.text
+    assert "<b>Sources</b>" in resp.text
+    assert "https://example.com/weather" in resp.text
+
+    # Missing TAVILY_API_KEY (web_search_client=None) returns friendly notice.
+    no_key_service, _, _ = make_conversation_service(
+        repository,
+        [pass1],
+        web_search_client=None,
+    )
+    no_key_resp = await no_key_service.handle_user_message(
+        "1001",
+        "Ngày mai Sài Gòn có mưa không?",
+        now=now + timedelta(minutes=1),
+    )
+    assert "Web Search Unavailable" in no_key_resp.text
 

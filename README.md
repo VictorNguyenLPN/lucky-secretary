@@ -119,6 +119,7 @@ This repository includes [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd
    - `TELEGRAM_ALLOWED_USER_IDS`
    - `OPENAI_API_KEY`
    - `GOOGLE_TOKEN_JSON` (paste the single-line JSON content of `./data/google_token.json`)
+   - `TAVILY_API_KEY` _(optional, free at [app.tavily.com](https://app.tavily.com/) for real-time web search in chat)_
 3. In Render **Settings > Deploy Hook**, copy the Deploy Hook URL.
 4. In GitHub repository **Settings > Secrets and variables > Actions**, add `RENDER_DEPLOY_HOOK_URL`.
 5. Every push to `main` runs `pytest` + Docker build verification, then triggers Render deployment automatically.

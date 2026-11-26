@@ -15,6 +15,7 @@ from lucky_secretary.core.llm.base import LLMProviderError
 from lucky_secretary.database.models import ConversationState, RequestStatus
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarError
+from lucky_secretary.integrations.web_search.client import TavilySearchClient, WebSearchError
 from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
 from lucky_secretary.schemas.calendar import (
     CalendarEventItem,
@@ -142,7 +143,9 @@ _NOTICE_ICONS: dict[str, str] = {
     "Invalid Event Details": "❌",
     "Invalid Request": "❌",
     "Unauthorized": "❌",
+    "Web Search Error": "❌",
     "Event Not Found": "⚠️",
+    "Web Search Unavailable": "⚠️",
     "Request Not Found": "⚠️",
     "Pending Confirmation": "⚠️",
     "Clarification Needed": "⚠️",
@@ -288,6 +291,7 @@ class ConversationService:
         repository: Repository,
         agent: CalendarAgent,
         calendar_service: CalendarService,
+        web_search_client: TavilySearchClient | None = None,
         default_timezone: str = "Asia/Ho_Chi_Minh",
         default_duration_minutes: int = 60,
         confirmation_timeout_minutes: int = 15,
@@ -297,6 +301,7 @@ class ConversationService:
         self._repo = repository
         self._agent = agent
         self._calendar_service = calendar_service
+        self._web_search_client = web_search_client
         self._default_timezone = default_timezone
         self._default_duration_minutes = default_duration_minutes
         self._confirmation_timeout_minutes = confirmation_timeout_minutes
@@ -473,9 +478,54 @@ class ConversationService:
             )
 
         if extraction.intent == UserIntent.GENERAL_CHAT:
-            if not extraction.reply_text or not extraction.reply_text.strip():
-                return ConversationResponse(text=_unsupported_request_text())
-            reply = html.escape(extraction.reply_text.strip())
+            web_results = []
+            if extraction.needs_web_search and extraction.search_query:
+                if self._web_search_client is None:
+                    if extraction.reply_text and extraction.reply_text.strip():
+                        reply = html.escape(extraction.reply_text.strip())
+                    else:
+                        return ConversationResponse(
+                            text=_format_notice(
+                                "Web Search Unavailable",
+                                "Real-time web search is not configured (missing TAVILY_API_KEY).",
+                            )
+                        )
+                else:
+                    try:
+                        web_results = await self._web_search_client.search(extraction.search_query)
+                    except WebSearchError as exc:
+                        return ConversationResponse(
+                            text=_format_notice("Web Search Error", str(exc))
+                        )
+                    try:
+                        extraction = await self._agent.process_message(
+                            user_message=text,
+                            partial_context=partial_context,
+                            chat_history=chat_history or None,
+                            web_results=[r.model_dump(mode="json") for r in web_results],
+                            reference_time=ref_local,
+                        )
+                    except LLMProviderError:
+                        return ConversationResponse(
+                            text=_format_notice(
+                                "Service Error",
+                                "Could not process your request right now. Please try again in a moment.",
+                            )
+                        )
+                    if not extraction.reply_text or not extraction.reply_text.strip():
+                        return ConversationResponse(text=_unsupported_request_text())
+                    reply = html.escape(extraction.reply_text.strip())
+                    if web_results:
+                        sources_lines = "\n".join(
+                            f'• <a href="{html.escape(r.url, quote=True)}">{html.escape(r.title)}</a>'
+                            for r in web_results[:3]
+                        )
+                        reply = f"{reply}\n\n<b>Sources</b>\n{sources_lines}"
+            else:
+                if not extraction.reply_text or not extraction.reply_text.strip():
+                    return ConversationResponse(text=_unsupported_request_text())
+                reply = html.escape(extraction.reply_text.strip())
+
             await self._record_turn(user.id, text, reply, now=current_time)
             if active_collecting_id is not None:
                 reply = (

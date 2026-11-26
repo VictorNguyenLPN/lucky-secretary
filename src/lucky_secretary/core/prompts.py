@@ -31,9 +31,12 @@ Rules:
    - "list_events": User wants to check, view, or list their schedule/events (e.g., "ngày mai tôi có những lịch nào", "hôm nay có lịch gì không", "what events do I have tomorrow").
    - "update_event": User wants to reschedule, rename, or modify an existing calendar event (e.g., "đổi lịch họp team ngày mai sang 10h", "dời lịch chơi cầu lông sang 19h", "change tomorrow's meeting location to Room B").
    - "delete_event": User wants to delete or remove an existing calendar event (e.g., "xóa lịch chơi cầu lông ngày mai", "hủy cuộc họp lúc 9h sáng mai", "delete my dentist appointment tomorrow").
-   - "general_chat": Everyday conversation, greetings ("chào bạn", "hello"), thank-yous, capability questions ("bạn làm được gì"), date/calendar arithmetic questions ("hôm nay thứ mấy", "thứ 6 là ngày mấy", "còn mấy ngày nữa đến cuối tuần"), general knowledge Q&A, productivity tips, or drafting short messages/notes. Write a helpful, concise, natural answer in reply_text in the same language as the user (plain text, no HTML tags). Use Current reference date and time for date/time questions and Recent conversation history for follow-ups.
+   - "general_chat": Everyday conversation, greetings ("chào bạn", "hello"), thank-yous, capability questions ("bạn làm được gì"), date/calendar arithmetic questions ("hôm nay thứ mấy", "thứ 6 là ngày mấy"), general knowledge Q&A, productivity tips, drafting short messages, OR questions needing live/real-time web information (weather, news, prices, exchange rates, venue addresses, sports schedules/scores).
+     * If "Web search results" is NOT provided AND answering accurately requires live/up-to-date external information (weather, current news, prices, exchange rates, sports results, venue info): set needs_web_search=true, write a concise search_query (in Vietnamese or English matching the topic), and leave reply_text=null.
+     * If "Web search results" IS provided: synthesize a clear, accurate answer in reply_text grounded in those results, addressing the user as "daddy", and set needs_web_search=false.
+     * For static/general chat or date arithmetic that does NOT need live web data: set needs_web_search=false, search_query=null, and write a helpful, concise, natural answer in reply_text in the user's language (plain text, no HTML tags).
    - "cancel": User explicitly wants to cancel the current bot workflow/confirmation.
-   - "other": Requests asking you to execute unsupported external actions or access live real-time data you do not have (e.g., sending emails via Gmail, accessing Google Drive, live weather forecasts, real-time stock/news, setting phone alarms). Leave reply_text=null (do NOT invent an event or pretend to execute unsupported actions).
+   - "other": Requests asking you to execute unsupported external actions you do not have tools for (e.g., sending emails via Gmail, accessing Google Drive, setting phone alarms, booking tickets). Leave reply_text=null and needs_web_search=false (do NOT invent an event or pretend to execute unsupported actions).
 2. Date & Time resolution:
    - Resolve relative dates ("hôm nay", "ngày mai", "thứ 6 tuần này", "next Monday", "tomorrow") strictly relative to the current reference date/time in {timezone_name}.
    - Format all ISO fields (start_datetime_iso, end_datetime_iso, target_date_start_iso, target_date_end_iso) as ISO-8601 strings with timezone offset (e.g., "2026-11-27T09:00:00+07:00").
@@ -73,8 +76,9 @@ def build_user_prompt(
     partial_context: dict[str, Any] | None = None,
     candidate_events: list[dict[str, Any]] | None = None,
     chat_history: list[dict[str, Any]] | None = None,
+    web_results: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the user prompt, attaching short-term history, partial context, and/or candidates."""
+    """Build the user prompt, attaching history, partial context, candidates, and/or web results."""
     sections: list[str] = []
     if chat_history:
         history_json = json.dumps(chat_history, ensure_ascii=False, indent=2)
@@ -85,6 +89,9 @@ def build_user_prompt(
     if candidate_events is not None:
         candidates_json = json.dumps(candidate_events, ensure_ascii=False, indent=2)
         sections.append(f"Candidate events from user's Google Calendar:\n{candidates_json}")
+    if web_results is not None:
+        web_json = json.dumps(web_results, ensure_ascii=False, indent=2)
+        sections.append(f"Web search results:\n{web_json}")
     if not sections:
         return user_message
 

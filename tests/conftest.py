@@ -13,6 +13,7 @@ from lucky_secretary.core.llm.base import LLMProvider
 from lucky_secretary.database.connection import DatabaseManager
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarError
+from lucky_secretary.integrations.web_search.client import WebSearchError, WebSearchResult
 from lucky_secretary.schemas.agent import EventExtractionResult
 from lucky_secretary.schemas.calendar import (
     CalendarEventItem,
@@ -105,6 +106,25 @@ class FakeGoogleCalendarClient:
         self.deleted_event_ids.append(event_id)
 
 
+class FakeWebSearchClient:
+    """Fake TavilySearchClient returning canned web results."""
+
+    def __init__(
+        self,
+        results: list[WebSearchResult] | None = None,
+        fail_with: str | None = None,
+    ) -> None:
+        self.results = list(results or [])
+        self.queries: list[str] = []
+        self.fail_with = fail_with
+
+    async def search(self, query: str) -> list[WebSearchResult]:
+        if self.fail_with:
+            raise WebSearchError(self.fail_with)
+        self.queries.append(query)
+        return self.results
+
+
 @pytest.fixture
 async def db_manager(tmp_path: Path) -> AsyncIterator[DatabaseManager]:
     db_path = tmp_path / "test_lucky_secretary.db"
@@ -126,6 +146,7 @@ def make_conversation_service(
     responses: list[EventExtractionResult | Exception] | None = None,
     fail_calendar_with: str | None = None,
     listed_events: list[CalendarEventItem] | None = None,
+    web_search_client: FakeWebSearchClient | None = None,
 ) -> tuple[ConversationService, FakeLLMProvider, FakeGoogleCalendarClient]:
     llm = FakeLLMProvider(responses)
     agent = CalendarAgent(llm_provider=llm)
@@ -138,6 +159,7 @@ def make_conversation_service(
         repository=repo,
         agent=agent,
         calendar_service=cal_service,
+        web_search_client=web_search_client,  # type: ignore[arg-type]
     )
     return service, llm, cal_client
 

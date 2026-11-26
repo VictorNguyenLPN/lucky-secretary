@@ -59,6 +59,8 @@ class EventExtractionResult(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     clarification_question: str | None = None
     reply_text: str | None = None
+    needs_web_search: bool = False
+    search_query: str | None = None
 
     def resolved_target_event_ids(self) -> list[str]:
         """Return deduplicated non-empty target event IDs preserving order."""
