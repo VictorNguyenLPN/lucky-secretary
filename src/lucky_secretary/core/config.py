@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     google_token_path: Path = Path("./data/google_token.json")
     google_token_json: str = ""
 
+    # Web Search (Optional - Tavily Free Tier)
+    tavily_api_key: str = ""
+    tavily_max_results: int = Field(default=4, ge=1, le=10)
+
     # Application
     app_env: str = "development"
     port: int | None = None

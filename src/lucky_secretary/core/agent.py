@@ -33,9 +33,10 @@ class CalendarAgent:
         partial_context: dict[str, Any] | None = None,
         candidate_events: list[dict[str, Any]] | None = None,
         chat_history: list[dict[str, Any]] | None = None,
+        web_results: list[dict[str, Any]] | None = None,
         reference_time: datetime | None = None,
     ) -> EventExtractionResult:
-        """Analyze a user message (optionally with history / partial context / candidates)."""
+        """Analyze a user message (optionally with history / partial context / candidates / web)."""
         ref_dt = (
             ensure_timezone_aware(reference_time, self._default_timezone)
             if reference_time is not None
@@ -51,6 +52,7 @@ class CalendarAgent:
             partial_context=partial_context,
             candidate_events=candidate_events,
             chat_history=chat_history,
+            web_results=web_results,
         )
         result = await self._llm.extract_event(
             system_prompt=system_prompt,

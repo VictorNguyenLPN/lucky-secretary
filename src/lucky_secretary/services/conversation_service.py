@@ -15,6 +15,7 @@ from lucky_secretary.core.llm.base import LLMProviderError
 from lucky_secretary.database.models import ConversationState, RequestStatus
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarError
+from lucky_secretary.integrations.web_search.client import TavilySearchClient, WebSearchError
 from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
 from lucky_secretary.schemas.calendar import (
     CalendarEventItem,
@@ -60,6 +61,24 @@ def format_event_preview(
         f"• <b>Location:</b> {location}\n"
         f"• <b>Description:</b> {description}"
     )
+
+
+def format_batch_create_preview(events: list[CalendarEventRequest]) -> str:
+    """Render a confirmation preview for creating one or multiple events."""
+    if len(events) == 1:
+        return format_event_preview(events[0])
+
+    lines = [f"📅 <b>Calendar Events Preview ({len(events)} events)</b>", ""]
+    for ev in events:
+        assert ev.end_datetime is not None
+        _, time_range = format_event_preview_datetime(ev.start_datetime, ev.end_datetime)
+        day_label = ev.start_datetime.strftime("%a %d/%m")
+        loc = f" ({html.escape(ev.location)})" if ev.location else ""
+        lines.append(
+            f"• <b>{html.escape(day_label)} {html.escape(time_range)}:</b> "
+            f"{html.escape(ev.summary)}{loc}"
+        )
+    return "\n".join(lines)
 
 
 def format_delete_preview(target: CalendarEventItem, timezone_name: str) -> str:
@@ -124,7 +143,9 @@ _NOTICE_ICONS: dict[str, str] = {
     "Invalid Event Details": "❌",
     "Invalid Request": "❌",
     "Unauthorized": "❌",
+    "Web Search Error": "❌",
     "Event Not Found": "⚠️",
+    "Web Search Unavailable": "⚠️",
     "Request Not Found": "⚠️",
     "Pending Confirmation": "⚠️",
     "Clarification Needed": "⚠️",
@@ -270,6 +291,7 @@ class ConversationService:
         repository: Repository,
         agent: CalendarAgent,
         calendar_service: CalendarService,
+        web_search_client: TavilySearchClient | None = None,
         default_timezone: str = "Asia/Ho_Chi_Minh",
         default_duration_minutes: int = 60,
         confirmation_timeout_minutes: int = 15,
@@ -279,6 +301,7 @@ class ConversationService:
         self._repo = repository
         self._agent = agent
         self._calendar_service = calendar_service
+        self._web_search_client = web_search_client
         self._default_timezone = default_timezone
         self._default_duration_minutes = default_duration_minutes
         self._confirmation_timeout_minutes = confirmation_timeout_minutes
@@ -453,6 +476,64 @@ class ConversationService:
             return ConversationResponse(
                 text=_format_notice("Request Cancelled", "Event request cancelled.")
             )
+
+        if extraction.intent == UserIntent.GENERAL_CHAT:
+            web_results = []
+            if extraction.needs_web_search and extraction.search_query:
+                if self._web_search_client is None:
+                    if extraction.reply_text and extraction.reply_text.strip():
+                        reply = html.escape(extraction.reply_text.strip())
+                    else:
+                        return ConversationResponse(
+                            text=_format_notice(
+                                "Web Search Unavailable",
+                                "Real-time web search is not configured (missing TAVILY_API_KEY).",
+                            )
+                        )
+                else:
+                    try:
+                        web_results = await self._web_search_client.search(extraction.search_query)
+                    except WebSearchError as exc:
+                        return ConversationResponse(
+                            text=_format_notice("Web Search Error", str(exc))
+                        )
+                    try:
+                        extraction = await self._agent.process_message(
+                            user_message=text,
+                            partial_context=partial_context,
+                            chat_history=chat_history or None,
+                            web_results=[r.model_dump(mode="json") for r in web_results],
+                            reference_time=ref_local,
+                        )
+                    except LLMProviderError:
+                        return ConversationResponse(
+                            text=_format_notice(
+                                "Service Error",
+                                "Could not process your request right now. Please try again in a moment.",
+                            )
+                        )
+                    if not extraction.reply_text or not extraction.reply_text.strip():
+                        return ConversationResponse(text=_unsupported_request_text())
+                    reply = html.escape(extraction.reply_text.strip())
+                    if web_results:
+                        sources_lines = "\n".join(
+                            f'• <a href="{html.escape(r.url, quote=True)}">{html.escape(r.title)}</a>'
+                            for r in web_results[:3]
+                        )
+                        reply = f"{reply}\n\n<b>Sources</b>\n{sources_lines}"
+            else:
+                if not extraction.reply_text or not extraction.reply_text.strip():
+                    return ConversationResponse(text=_unsupported_request_text())
+                reply = html.escape(extraction.reply_text.strip())
+
+            await self._record_turn(user.id, text, reply, now=current_time)
+            if active_collecting_id is not None:
+                reply = (
+                    f"{reply}\n\n"
+                    "<i>Note: Your pending event request is still waiting for details "
+                    "(or send /cancel to discard).</i>"
+                )
+            return ConversationResponse(text=reply)
 
         if extraction.intent == UserIntent.OTHER:
             if active_collecting_id is not None:
@@ -687,7 +768,7 @@ class ConversationService:
             )
 
         try:
-            event = extraction.to_calendar_event_request(
+            events = extraction.to_calendar_event_requests(
                 default_duration=self._default_duration_minutes,
                 default_timezone=user.timezone,
             )
@@ -723,7 +804,14 @@ class ConversationService:
                 )
             )
 
-        event_payload = event.model_dump(mode="json")
+        if len(events) == 1:
+            event_payload: dict[str, Any] = events[0].model_dump(mode="json")
+        else:
+            event_payload = {
+                "action": "create_batch",
+                "events": [ev.model_dump(mode="json") for ev in events],
+            }
+
         if active_collecting_id is not None:
             req = await self._repo.update_calendar_request(
                 active_collecting_id,
@@ -744,7 +832,7 @@ class ConversationService:
             ConversationState.WAITING_CONFIRMATION,
             req.id,
         )
-        preview_text = format_event_preview(event)
+        preview_text = format_batch_create_preview(events)
         await self._record_turn(user.id, text, preview_text, now=current_time)
         return ConversationResponse(
             text=preview_text,
@@ -909,6 +997,68 @@ class ConversationService:
                     created_at=current_time,
                 )
             return ConversationResponse(text=text, clear_keyboard=True)
+
+        if action == "create_batch":
+            raw_events = req.event_payload.get("events", [])
+            try:
+                events_to_create = [
+                    CalendarEventRequest.model_validate(item) for item in raw_events
+                ]
+                results = [
+                    await self._calendar_service.create_calendar_event(ev)
+                    for ev in events_to_create
+                ]
+            except (ValueError, GoogleCalendarError) as exc:
+                logger.error("Batch calendar creation failed for request_id=%s: %s", request_id, exc)
+                await self._repo.mark_request_failed(request_id, user.id)
+                return ConversationResponse(
+                    text=_format_notice(
+                        "Google Calendar Error",
+                        f"Failed to create Google Calendar events: {exc}",
+                    ),
+                    clear_keyboard=True,
+                )
+
+            await self._repo.mark_request_completed(
+                request_id=request_id,
+                user_id=user.id,
+                google_event_id=",".join(r.event_id for r in results),
+                event_url=results[0].html_link if results else "",
+            )
+            lines = [f"✅ <b>Events created successfully! ({len(results)} events)</b>", ""]
+            ref_items: list[dict[str, Any]] = []
+            for ev, res in zip(events_to_create, results):
+                tz = ZoneInfo(res.timezone)
+                local_start = res.start_datetime.astimezone(tz)
+                local_end = res.end_datetime.astimezone(tz)
+                _, time_range = format_event_preview_datetime(local_start, local_end)
+                escaped_link = html.escape(res.html_link, quote=True)
+                lines.append(
+                    f"• <b>{html.escape(local_start.strftime('%a %d/%m'))} "
+                    f"{html.escape(time_range)}:</b> "
+                    f'{html.escape(res.summary)} (<a href="{escaped_link}">Open</a>)'
+                )
+                ref_items.append(
+                    CalendarEventItem(
+                        event_id=res.event_id,
+                        summary=res.summary,
+                        start_datetime=res.start_datetime,
+                        end_datetime=res.end_datetime,
+                        location=ev.location,
+                        description=ev.description,
+                        html_link=res.html_link,
+                    ).model_dump(mode="json")
+                )
+            success_text = "\n".join(lines)
+            if self._history_max_messages > 0:
+                await self._repo.add_chat_message(
+                    user_id=user.id,
+                    role="assistant",
+                    content=success_text,
+                    referenced_events=ref_items,
+                    created_at=current_time,
+                )
+            return ConversationResponse(text=success_text, clear_keyboard=True)
 
         try:
             event = CalendarEventRequest.model_validate(req.event_payload)

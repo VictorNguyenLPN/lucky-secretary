@@ -21,6 +21,7 @@ from lucky_secretary.database.connection import DatabaseManager
 from lucky_secretary.database.repository import Repository
 from lucky_secretary.integrations.google_calendar.auth import load_or_refresh_credentials
 from lucky_secretary.integrations.google_calendar.client import GoogleCalendarClient
+from lucky_secretary.integrations.web_search.client import TavilySearchClient
 from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
 from lucky_secretary.schemas.calendar import CalendarEventRequest
 from lucky_secretary.utils.health import HealthCheckServer
@@ -419,4 +420,45 @@ async def test_health_check_server_responds_ok() -> None:
         assert response.endswith(b'{"status":"ok"}')
     finally:
         await server.stop()
+
+
+async def test_tavily_search_client_calls_api_correctly() -> None:
+    import httpx
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "USD to VND Today",
+                        "url": "https://example.com/fx",
+                        "content": "1 USD = 25,400 VND",
+                    }
+                ]
+            },
+        )
+
+    client = TavilySearchClient(
+        api_key="tvly-test-key",
+        max_results=3,
+        transport=httpx.MockTransport(handler),
+    )
+    results = await client.search("USD to VND rate today")
+    assert captured["url"] == "https://api.tavily.com/search"
+    assert captured["auth"] == "Bearer tvly-test-key"
+    assert captured["body"] == {
+        "query": "USD to VND rate today",
+        "search_depth": "basic",
+        "max_results": 3,
+        "include_answer": False,
+    }
+    assert len(results) == 1
+    assert results[0].title == "USD to VND Today"
+    assert results[0].url == "https://example.com/fx"
 
