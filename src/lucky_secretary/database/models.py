@@ -65,3 +65,14 @@ class CalendarRequestRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+
+class ChatMessageRecord(BaseModel):
+    """Row representation for the chat_messages table (short-term history)."""
+
+    id: int
+    user_id: int
+    role: str
+    content: str
+    referenced_events: list[dict[str, Any]] | None = None
+    created_at: datetime
+

@@ -54,8 +54,11 @@ Rules:
    - Required fields for "create_event": summary (non-empty title), explicit date, explicit start time.
    - If any required information is missing or ambiguous, add the missing field names ("summary", "date", "time") to missing_fields and write a short, polite clarification_question in the same language as the user (Vietnamese or English).
    - If the user did NOT mention duration or end time when creating an event, leave end_datetime_iso=null and duration_minutes=null (the system will apply the {default_duration_minutes}-minute default). Do NOT treat missing duration/location/description as missing required fields.
-4. Merging partial context:
+4. Merging partial context & short-term conversation history:
    - When previous partial context is provided, preserve the ongoing intent ("update_event", "delete_event", or "create_event") and previously extracted fields unless the user explicitly corrects or updates them.
+   - When "Recent conversation history" is provided, use it (along with any referenced_events and their event_id) to resolve follow-up references like "cái thứ 2", "lịch vừa tạo", "đổi nó sang 10h", "thêm địa điểm...", or "sau đó 1 tiếng".
+   - If the user refers to an event already listed in referenced_events from recent history, set target_event_id (or target_event_ids) directly to its exact event_id.
+   - Do NOT let dates or titles from an older unrelated turn override explicit details in a new independent event request.
 """
 
 
@@ -63,9 +66,13 @@ def build_user_prompt(
     user_message: str,
     partial_context: dict[str, Any] | None = None,
     candidate_events: list[dict[str, Any]] | None = None,
+    chat_history: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the user prompt, attaching partial context and/or candidate calendar events."""
+    """Build the user prompt, attaching short-term history, partial context, and/or candidates."""
     sections: list[str] = []
+    if chat_history:
+        history_json = json.dumps(chat_history, ensure_ascii=False, indent=2)
+        sections.append(f"Recent conversation history:\n{history_json}")
     if partial_context:
         context_json = json.dumps(partial_context, ensure_ascii=False, indent=2)
         sections.append(f"Previous partial event context:\n{context_json}")

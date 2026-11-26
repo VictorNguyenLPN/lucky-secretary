@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
@@ -272,6 +273,8 @@ class ConversationService:
         default_timezone: str = "Asia/Ho_Chi_Minh",
         default_duration_minutes: int = 60,
         confirmation_timeout_minutes: int = 15,
+        history_max_messages: int = 6,
+        history_ttl_minutes: int = 30,
     ) -> None:
         self._repo = repository
         self._agent = agent
@@ -279,6 +282,61 @@ class ConversationService:
         self._default_timezone = default_timezone
         self._default_duration_minutes = default_duration_minutes
         self._confirmation_timeout_minutes = confirmation_timeout_minutes
+        self._history_max_messages = history_max_messages
+        self._history_ttl_minutes = history_ttl_minutes
+
+    async def _load_short_term_history(
+        self,
+        user_id: int,
+        current_time: datetime,
+    ) -> tuple[list[dict[str, Any]], dict[str, CalendarEventItem]]:
+        """Load recent messages within TTL and index any referenced calendar events."""
+        if self._history_max_messages <= 0:
+            return [], {}
+        since = current_time - timedelta(minutes=self._history_ttl_minutes)
+        records = await self._repo.get_recent_chat_messages(
+            user_id=user_id,
+            since=since,
+            limit=self._history_max_messages,
+        )
+        history: list[dict[str, Any]] = []
+        events_by_id: dict[str, CalendarEventItem] = {}
+        for rec in records:
+            entry: dict[str, Any] = {"role": rec.role, "content": rec.content}
+            if rec.referenced_events:
+                entry["referenced_events"] = rec.referenced_events
+                for raw_item in rec.referenced_events:
+                    item = CalendarEventItem.model_validate(raw_item)
+                    if item.event_id:
+                        events_by_id[item.event_id] = item
+            history.append(entry)
+        return history, events_by_id
+
+    async def _record_turn(
+        self,
+        user_id: int,
+        user_text: str,
+        assistant_text: str,
+        *,
+        now: datetime,
+        referenced_events: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Persist a user+assistant turn into short-term chat history."""
+        if self._history_max_messages <= 0:
+            return
+        await self._repo.add_chat_message(
+            user_id=user_id,
+            role="user",
+            content=user_text,
+            created_at=now,
+        )
+        await self._repo.add_chat_message(
+            user_id=user_id,
+            role="assistant",
+            content=assistant_text,
+            referenced_events=referenced_events,
+            created_at=now + timedelta(microseconds=1),
+        )
 
     async def handle_user_message(
         self,
@@ -343,10 +401,15 @@ class ConversationService:
                 await self._repo.update_conversation(user.id, ConversationState.IDLE, None)
 
         ref_local = ensure_timezone_aware(current_time, user.timezone)
+        chat_history, history_events_by_id = await self._load_short_term_history(
+            user.id,
+            current_time,
+        )
         try:
             extraction = await self._agent.process_message(
                 user_message=text,
                 partial_context=partial_context,
+                chat_history=chat_history or None,
                 reference_time=ref_local,
             )
         except LLMProviderError:
@@ -372,9 +435,15 @@ class ConversationService:
                         f"Failed to fetch your Google Calendar events: {exc}",
                     )
                 )
-            return ConversationResponse(
-                text=format_event_list(events, time_min, time_max, user.timezone)
+            response_text = format_event_list(events, time_min, time_max, user.timezone)
+            await self._record_turn(
+                user.id,
+                text,
+                response_text,
+                now=current_time,
+                referenced_events=[e.model_dump(mode="json") for e in events] or None,
             )
+            return ConversationResponse(text=response_text)
 
         if extraction.intent == UserIntent.CANCEL:
             if active_collecting_id is not None:
@@ -426,97 +495,114 @@ class ConversationService:
                 ConversationState.COLLECTING_INFORMATION,
                 req.id,
             )
-            return ConversationResponse(text=html.escape(question))
+            clarification_text = html.escape(question)
+            await self._record_turn(user.id, text, clarification_text, now=current_time)
+            return ConversationResponse(text=clarification_text)
 
         if extraction.intent in (UserIntent.UPDATE_EVENT, UserIntent.DELETE_EVENT):
-            try:
-                search_min, search_max = extraction.to_target_search_range(
-                    reference_time=ref_local,
-                    default_timezone=user.timezone,
-                )
-                candidates = await self._calendar_service.list_calendar_events(
-                    search_min,
-                    search_max,
-                )
-            except (ValueError, GoogleCalendarError) as exc:
-                logger.error("Failed to search calendar events: %s", exc)
-                return ConversationResponse(
-                    text=_format_notice(
-                        "Google Calendar Error",
-                        f"Failed to search your Google Calendar events: {exc}",
-                    )
-                )
-
-            if not candidates:
-                if active_collecting_id is not None:
-                    await self._repo.mark_request_cancelled(active_collecting_id, user.id)
-                return ConversationResponse(
-                    text=_format_notice(
-                        "Event Not Found",
-                        "No matching event was found in your Google Calendar for the specified period.",
-                        ["Check your schedule first: Ngày mai tôi có những lịch nào?"],
-                    )
-                )
-
-            candidate_by_id = {c.event_id: c for c in candidates if c.event_id}
-            if (
-                extraction.intent == UserIntent.DELETE_EVENT
-                and extraction.delete_all_in_range
-                and not (extraction.target_summary and extraction.target_summary.strip())
+            history_matched_targets = [
+                history_events_by_id[eid]
+                for eid in extraction.resolved_target_event_ids()
+                if eid in history_events_by_id
+            ]
+            if history_matched_targets and not (
+                extraction.intent == UserIntent.DELETE_EVENT and extraction.delete_all_in_range
             ):
-                matched_targets = list(candidate_by_id.values())
+                matched_targets = history_matched_targets
             else:
-                resolved_ids = [
-                    eid for eid in extraction.resolved_target_event_ids() if eid in candidate_by_id
-                ]
-                if not resolved_ids:
-                    candidates_data = [c.model_dump(mode="json") for c in candidates]
-                    try:
-                        extraction = await self._agent.process_message(
-                            user_message=text,
-                            partial_context=partial_context,
-                            candidate_events=candidates_data,
-                            reference_time=ref_local,
-                        )
-                    except LLMProviderError:
-                        return ConversationResponse(
-                            text=_format_notice(
-                                "Service Error",
-                                "Could not process your request right now. Please try again in a moment.",
-                            )
-                        )
-
-                if extraction.missing_fields:
-                    question = (
-                        extraction.clarification_question
-                        or "Could you please clarify which event you want to modify?"
+                try:
+                    search_min, search_max = extraction.to_target_search_range(
+                        reference_time=ref_local,
+                        default_timezone=user.timezone,
                     )
-                    partial_payload = extraction.to_partial_context()
+                    candidates = await self._calendar_service.list_calendar_events(
+                        search_min,
+                        search_max,
+                    )
+                except (ValueError, GoogleCalendarError) as exc:
+                    logger.error("Failed to search calendar events: %s", exc)
+                    return ConversationResponse(
+                        text=_format_notice(
+                            "Google Calendar Error",
+                            f"Failed to search your Google Calendar events: {exc}",
+                        )
+                    )
+
+                if not candidates:
                     if active_collecting_id is not None:
-                        req = await self._repo.update_calendar_request(
-                            active_collecting_id,
-                            event_payload=partial_payload,
-                            expires_at=expires_at,
+                        await self._repo.mark_request_cancelled(active_collecting_id, user.id)
+                    return ConversationResponse(
+                        text=_format_notice(
+                            "Event Not Found",
+                            "No matching event was found in your Google Calendar for the specified period.",
+                            ["Check your schedule first: Ngày mai tôi có những lịch nào?"],
                         )
-                    else:
-                        req = await self._repo.create_calendar_request(
-                            user_id=user.id,
-                            status=RequestStatus.COLLECTING,
-                            event_payload=partial_payload,
-                            expires_at=expires_at,
-                        )
-                    await self._repo.update_conversation(
-                        user.id,
-                        ConversationState.COLLECTING_INFORMATION,
-                        req.id,
                     )
-                    return ConversationResponse(text=html.escape(question))
 
-                matched_targets = [
-                    candidate_by_id[eid]
-                    for eid in extraction.resolved_target_event_ids()
-                    if eid in candidate_by_id
-                ]
+                candidate_by_id = {c.event_id: c for c in candidates if c.event_id}
+                if (
+                    extraction.intent == UserIntent.DELETE_EVENT
+                    and extraction.delete_all_in_range
+                    and not (extraction.target_summary and extraction.target_summary.strip())
+                ):
+                    matched_targets = list(candidate_by_id.values())
+                else:
+                    resolved_ids = [
+                        eid
+                        for eid in extraction.resolved_target_event_ids()
+                        if eid in candidate_by_id
+                    ]
+                    if not resolved_ids:
+                        candidates_data = [c.model_dump(mode="json") for c in candidates]
+                        try:
+                            extraction = await self._agent.process_message(
+                                user_message=text,
+                                partial_context=partial_context,
+                                candidate_events=candidates_data,
+                                chat_history=chat_history or None,
+                                reference_time=ref_local,
+                            )
+                        except LLMProviderError:
+                            return ConversationResponse(
+                                text=_format_notice(
+                                    "Service Error",
+                                    "Could not process your request right now. Please try again in a moment.",
+                                )
+                            )
+
+                    if extraction.missing_fields:
+                        question = (
+                            extraction.clarification_question
+                            or "Could you please clarify which event you want to modify?"
+                        )
+                        partial_payload = extraction.to_partial_context()
+                        if active_collecting_id is not None:
+                            req = await self._repo.update_calendar_request(
+                                active_collecting_id,
+                                event_payload=partial_payload,
+                                expires_at=expires_at,
+                            )
+                        else:
+                            req = await self._repo.create_calendar_request(
+                                user_id=user.id,
+                                status=RequestStatus.COLLECTING,
+                                event_payload=partial_payload,
+                                expires_at=expires_at,
+                            )
+                        await self._repo.update_conversation(
+                            user.id,
+                            ConversationState.COLLECTING_INFORMATION,
+                            req.id,
+                        )
+                        clarification_text = html.escape(question)
+                        await self._record_turn(user.id, text, clarification_text, now=current_time)
+                        return ConversationResponse(text=clarification_text)
+
+                    matched_targets = [
+                        candidate_by_id[eid]
+                        for eid in extraction.resolved_target_event_ids()
+                        if eid in candidate_by_id
+                    ]
 
             if not matched_targets:
                 if active_collecting_id is not None:
@@ -588,6 +674,13 @@ class ConversationService:
                 ConversationState.WAITING_CONFIRMATION,
                 req.id,
             )
+            await self._record_turn(
+                user.id,
+                text,
+                preview_text,
+                now=current_time,
+                referenced_events=[t.model_dump(mode="json") for t in matched_targets],
+            )
             return ConversationResponse(
                 text=preview_text,
                 reply_markup_request_id=req.id,
@@ -651,8 +744,10 @@ class ConversationService:
             ConversationState.WAITING_CONFIRMATION,
             req.id,
         )
+        preview_text = format_event_preview(event)
+        await self._record_turn(user.id, text, preview_text, now=current_time)
         return ConversationResponse(
-            text=format_event_preview(event),
+            text=preview_text,
             reply_markup_request_id=req.id,
         )
 
@@ -806,6 +901,13 @@ class ConversationService:
                     f"✅ <b>Events deleted successfully! ({len(summaries)} events)</b>\n\n"
                     f"{bullet_lines}"
                 )
+            if self._history_max_messages > 0:
+                await self._repo.add_chat_message(
+                    user_id=user.id,
+                    role="assistant",
+                    content=text,
+                    created_at=current_time,
+                )
             return ConversationResponse(text=text, clear_keyboard=True)
 
         try:
@@ -834,10 +936,41 @@ class ConversationService:
             google_event_id=result.event_id,
             event_url=result.html_link,
         )
+        success_text = _format_event_success(success_heading, result)
+        if self._history_max_messages > 0:
+            ref_item = CalendarEventItem(
+                event_id=result.event_id,
+                summary=result.summary,
+                start_datetime=result.start_datetime,
+                end_datetime=result.end_datetime,
+                location=event.location,
+                description=event.description,
+                html_link=result.html_link,
+            )
+            await self._repo.add_chat_message(
+                user_id=user.id,
+                role="assistant",
+                content=success_text,
+                referenced_events=[ref_item.model_dump(mode="json")],
+                created_at=current_time,
+            )
         return ConversationResponse(
-            text=_format_event_success(success_heading, result),
+            text=success_text,
             clear_keyboard=True,
         )
+
+    async def handle_clear_command(self, telegram_user_id: str) -> None:
+        """Reset active state and wipe short-term chat history for /clear."""
+        user = await self._repo.get_or_create_user(telegram_user_id, self._default_timezone)
+        conv = await self._repo.get_conversation(user.id)
+        if conv.pending_request_id and conv.state in (
+            ConversationState.COLLECTING_INFORMATION,
+            ConversationState.WAITING_CONFIRMATION,
+        ):
+            await self._repo.mark_request_cancelled(conv.pending_request_id, user.id)
+        else:
+            await self._repo.update_conversation(user.id, ConversationState.IDLE, None)
+        await self._repo.clear_chat_messages(user.id)
 
     async def handle_cancel_command(self, telegram_user_id: str) -> ConversationResponse:
         """Cancel any active collecting or pending confirmation request via /cancel."""
