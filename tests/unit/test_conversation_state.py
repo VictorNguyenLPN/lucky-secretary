@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from lucky_secretary.database.models import ConversationState, RequestStatus
 from lucky_secretary.database.repository import Repository
-from lucky_secretary.schemas.agent import EventExtractionResult, UserIntent
+from lucky_secretary.schemas.agent import EventExtractionResult, ExtractedEventItem, UserIntent
 from lucky_secretary.schemas.calendar import CalendarEventItem
 from tests.conftest import make_conversation_service
 
@@ -606,4 +606,123 @@ async def test_short_term_history_ttl_expiration_and_clear_command(
         now=t0 + timedelta(minutes=32),
     )
     assert "Recent conversation history" not in llm.calls[2][1]
+
+
+async def test_general_chat_everyday_questions_and_side_question_mid_clarification(
+    repository: Repository,
+) -> None:
+    greeting = EventExtractionResult(
+        intent=UserIntent.GENERAL_CHAT,
+        reply_text="Chào bạn! Hôm nay là thứ Năm, ngày 26/11/2026.",
+        missing_fields=[],
+    )
+    followup_chat = EventExtractionResult(
+        intent=UserIntent.GENERAL_CHAT,
+        reply_text="Thứ Sáu là ngày 27/11/2026.",
+        missing_fields=[],
+    )
+    missing_time = EventExtractionResult(
+        intent=UserIntent.CREATE_EVENT,
+        summary="Họp team",
+        has_explicit_date=True,
+        has_explicit_time=False,
+        missing_fields=["time"],
+        clarification_question="Bạn muốn họp vào lúc mấy giờ?",
+    )
+    side_question = EventExtractionResult(
+        intent=UserIntent.GENERAL_CHAT,
+        reply_text="Thứ Sáu tuần này là ngày 27/11/2026.",
+        missing_fields=[],
+    )
+    service, llm, _ = make_conversation_service(
+        repository,
+        [greeting, followup_chat, missing_time, side_question],
+    )
+    t0 = datetime(2026, 11, 26, 3, 0, tzinfo=timezone.utc)
+
+    r1 = await service.handle_user_message("1001", "Chào bạn, hôm nay thứ mấy?", now=t0)
+    assert "thứ Năm, ngày 26/11/2026" in r1.text
+
+    r2 = await service.handle_user_message(
+        "1001",
+        "Vậy thứ 6 là ngày mấy?",
+        now=t0 + timedelta(minutes=1),
+    )
+    assert "Recent conversation history" in llm.calls[1][1]
+    assert "27/11/2026" in r2.text
+
+    # Side question during active clarification preserves COLLECTING_INFORMATION state.
+    await service.handle_user_message("1001", "Tạo lịch họp team thứ 6", now=t0 + timedelta(minutes=2))
+    r4 = await service.handle_user_message(
+        "1001",
+        "Thứ 6 là ngày bao nhiêu vậy?",
+        now=t0 + timedelta(minutes=3),
+    )
+    assert "27/11/2026" in r4.text
+    assert "pending event request is still waiting" in r4.text
+
+    user = await repository.get_or_create_user("1001")
+    conv = await repository.get_conversation(user.id)
+    assert conv.state == ConversationState.COLLECTING_INFORMATION
+
+
+async def test_batch_create_multiple_events_with_clarification(
+    repository: Repository,
+) -> None:
+    missing_time = EventExtractionResult(
+        intent=UserIntent.CREATE_EVENT,
+        summary="Ăn tối với Messi",
+        has_explicit_date=True,
+        has_explicit_time=False,
+        missing_fields=["time"],
+        clarification_question="Daddy muốn ăn tối với Messi lúc mấy giờ vào thứ 7 và thứ 2 ạ?",
+    )
+    complete_batch = EventExtractionResult(
+        intent=UserIntent.PROVIDE_CLARIFICATION,
+        summary="Ăn tối với Messi",
+        events=[
+            ExtractedEventItem(
+                summary="Ăn tối với Messi",
+                start_datetime_iso="2026-11-28T19:00:00+07:00",
+            ),
+            ExtractedEventItem(
+                summary="Ăn tối với Messi",
+                start_datetime_iso="2026-11-30T19:00:00+07:00",
+            ),
+        ],
+        has_explicit_date=True,
+        has_explicit_time=True,
+        missing_fields=[],
+    )
+    service, _, cal_client = make_conversation_service(
+        repository,
+        [missing_time, complete_batch],
+    )
+    now = datetime(2026, 11, 26, 3, 45, tzinfo=timezone.utc)
+
+    q = await service.handle_user_message(
+        "1001",
+        "tạo lịch ăn tối với messi vào tối thứ 7 và tối thứ 2",
+        now=now,
+    )
+    assert "thứ 7 và thứ 2" in q.text
+    assert q.reply_markup_request_id is None
+
+    preview = await service.handle_user_message("1001", "19h", now=now + timedelta(seconds=30))
+    assert "Calendar Events Preview (2 events)" in preview.text
+    assert "28/11" in preview.text
+    assert "30/11" in preview.text
+    assert preview.reply_markup_request_id is not None
+    assert len(cal_client.created_events) == 0
+
+    confirm_resp = await service.handle_confirmation(
+        "1001",
+        preview.reply_markup_request_id,
+        confirmed=True,
+        now=now + timedelta(seconds=45),
+    )
+    assert "Events created successfully! (2 events)" in confirm_resp.text
+    assert len(cal_client.created_events) == 2
+    assert cal_client.created_events[0].start_datetime.day == 28
+    assert cal_client.created_events[1].start_datetime.day == 30
 

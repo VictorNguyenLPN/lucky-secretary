@@ -13,7 +13,7 @@
 
 ## Features
 
-- Bilingual natural language extraction (Vietnamese & English) for creating, querying, updating, and deleting calendar events with relative date/time resolution.
+- Bilingual natural language extraction (Vietnamese & English) for creating, querying, updating, and deleting calendar events with relative date/time resolution, plus everyday Q&A and drafting assistance.
 - Multi-turn clarification workflow when title, date, or time is missing or ambiguous.
 - Explicit event preview with **Confirm** / **Cancel** inline keyboard buttons.
 - Persistent SQLite state (`users`, `conversations`, `calendar_requests`) surviving restarts.

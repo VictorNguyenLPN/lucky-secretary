@@ -19,8 +19,21 @@ class UserIntent(str, Enum):
     LIST_EVENTS = "list_events"
     UPDATE_EVENT = "update_event"
     DELETE_EVENT = "delete_event"
+    GENERAL_CHAT = "general_chat"
     CANCEL = "cancel"
     OTHER = "other"
+
+
+class ExtractedEventItem(BaseModel):
+    """Single event item extracted when the user requests multiple events at once."""
+
+    summary: str
+    start_datetime_iso: str
+    end_datetime_iso: str | None = None
+    duration_minutes: int | None = None
+    timezone: str | None = None
+    location: str | None = None
+    description: str | None = None
 
 
 class EventExtractionResult(BaseModel):
@@ -28,6 +41,7 @@ class EventExtractionResult(BaseModel):
 
     intent: UserIntent
     summary: str | None = None
+    events: list[ExtractedEventItem] = Field(default_factory=list)
     target_event_id: str | None = None
     target_event_ids: list[str] = Field(default_factory=list)
     delete_all_in_range: bool = False
@@ -44,6 +58,7 @@ class EventExtractionResult(BaseModel):
     has_explicit_time: bool = False
     missing_fields: list[str] = Field(default_factory=list)
     clarification_question: str | None = None
+    reply_text: str | None = None
 
     def resolved_target_event_ids(self) -> list[str]:
         """Return deduplicated non-empty target event IDs preserving order."""
@@ -62,6 +77,15 @@ class EventExtractionResult(BaseModel):
             return False
 
         if self.intent in (UserIntent.CREATE_EVENT, UserIntent.PROVIDE_CLARIFICATION):
+            if self.events:
+                return (
+                    self.has_explicit_date
+                    and self.has_explicit_time
+                    and all(
+                        bool(item.summary and item.summary.strip()) and bool(item.start_datetime_iso)
+                        for item in self.events
+                    )
+                )
             return (
                 bool(self.summary and self.summary.strip())
                 and self.has_explicit_date
@@ -118,6 +142,46 @@ class EventExtractionResult(BaseModel):
             location=self.location,
             description=self.description,
         )
+
+    def to_calendar_event_requests(
+        self,
+        default_duration: int = 60,
+        default_timezone: str = "Asia/Ho_Chi_Minh",
+    ) -> list[CalendarEventRequest]:
+        """Convert complete extraction output into one or more validated CalendarEventRequests."""
+        if not self.events:
+            return [
+                self.to_calendar_event_request(
+                    default_duration=default_duration,
+                    default_timezone=default_timezone,
+                )
+            ]
+
+        validated: list[CalendarEventRequest] = []
+        for item in self.events:
+            if not item.summary or not item.summary.strip():
+                raise ValueError("Missing event summary.")
+            if not item.start_datetime_iso:
+                raise ValueError("Missing start_datetime_iso.")
+            start_dt = datetime.fromisoformat(item.start_datetime_iso)
+            end_dt = datetime.fromisoformat(item.end_datetime_iso) if item.end_datetime_iso else None
+            duration = item.duration_minutes
+            if end_dt is None and duration is None:
+                duration = self.duration_minutes if self.duration_minutes is not None else default_duration
+            validated.append(
+                CalendarEventRequest(
+                    summary=item.summary,
+                    start_datetime=start_dt,
+                    end_datetime=end_dt,
+                    duration_minutes=duration,
+                    timezone=item.timezone or self.timezone or default_timezone,
+                    location=item.location if item.location is not None else self.location,
+                    description=(
+                        item.description if item.description is not None else self.description
+                    ),
+                )
+            )
+        return validated
 
     def to_calendar_query_range(
         self,
