@@ -12,6 +12,7 @@ import aiosqlite
 from lucky_secretary.database.connection import DatabaseManager
 from lucky_secretary.database.models import (
     CalendarRequestRecord,
+    ChatMessageRecord,
     ConversationRecord,
     ConversationState,
     RequestStatus,
@@ -61,6 +62,18 @@ def _row_to_request(row: aiosqlite.Row) -> CalendarRequestRecord:
         expires_at=_from_iso(row["expires_at"]),
         created_at=_from_iso(row["created_at"]),
         updated_at=_from_iso(row["updated_at"]),
+    )
+
+
+def _row_to_chat_message(row: aiosqlite.Row) -> ChatMessageRecord:
+    raw_refs = row["referenced_events"]
+    return ChatMessageRecord(
+        id=row["id"],
+        user_id=row["user_id"],
+        role=row["role"],
+        content=row["content"],
+        referenced_events=json.loads(raw_refs) if raw_refs else None,
+        created_at=_from_iso(row["created_at"]),
     )
 
 
@@ -404,5 +417,75 @@ class Repository:
                 """,
                 (ConversationState.IDLE.value, now_iso, user_id),
             )
+            await conn.commit()
+
+    async def add_chat_message(
+        self,
+        user_id: int,
+        role: str,
+        content: str,
+        referenced_events: list[dict[str, Any]] | None = None,
+        created_at: datetime | None = None,
+        max_stored_per_user: int = 20,
+    ) -> ChatMessageRecord:
+        """Insert a short-term chat message and prune older rows beyond max_stored_per_user."""
+        ts_iso = _to_utc_iso(created_at or now_utc())
+        refs_json = json.dumps(referenced_events, ensure_ascii=False) if referenced_events else None
+
+        async with self.db.connect() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO chat_messages (user_id, role, content, referenced_events, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, role, content, refs_json, ts_iso),
+            )
+            msg_id = cursor.lastrowid
+            if max_stored_per_user > 0:
+                await conn.execute(
+                    """
+                    DELETE FROM chat_messages
+                    WHERE user_id = ? AND id NOT IN (
+                        SELECT id FROM chat_messages
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (user_id, user_id, max_stored_per_user),
+                )
+            await conn.commit()
+            fetched = await conn.execute("SELECT * FROM chat_messages WHERE id = ?", (msg_id,))
+            row = await fetched.fetchone()
+            assert row is not None
+            return _row_to_chat_message(row)
+
+    async def get_recent_chat_messages(
+        self,
+        user_id: int,
+        since: datetime,
+        limit: int = 6,
+    ) -> list[ChatMessageRecord]:
+        """Fetch up to limit newest messages with created_at >= since in chronological order."""
+        if limit <= 0:
+            return []
+        since_iso = _to_utc_iso(since)
+        async with self.db.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM chat_messages
+                WHERE user_id = ? AND created_at >= ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, since_iso, limit),
+            )
+            rows = await cursor.fetchall()
+        return [_row_to_chat_message(row) for row in reversed(rows)]
+
+    async def clear_chat_messages(self, user_id: int) -> None:
+        """Delete all short-term chat history rows for user_id."""
+        async with self.db.connect() as conn:
+            await conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
             await conn.commit()
 

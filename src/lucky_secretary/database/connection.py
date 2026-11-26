@@ -42,6 +42,18 @@ CREATE TABLE IF NOT EXISTS conversations (
     pending_request_id TEXT REFERENCES calendar_requests(id) ON DELETE SET NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    referenced_events TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created
+    ON chat_messages(user_id, created_at);
 """
 
 

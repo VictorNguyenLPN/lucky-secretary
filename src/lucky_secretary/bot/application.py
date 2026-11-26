@@ -74,6 +74,8 @@ def build_application(settings: Settings, db: DatabaseManager) -> Application:
         default_timezone=settings.default_timezone,
         default_duration_minutes=settings.default_event_duration,
         confirmation_timeout_minutes=settings.confirmation_timeout_minutes,
+        history_max_messages=settings.history_max_messages,
+        history_ttl_minutes=settings.history_ttl_minutes,
     )
     health_server = HealthCheckServer(port=settings.port) if settings.port is not None else None
 

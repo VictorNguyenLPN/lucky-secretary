@@ -109,7 +109,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     service: ConversationService = context.bot_data["conversation_service"]
-    await service.handle_cancel_command(str(update.effective_user.id))
+    await service.handle_clear_command(str(update.effective_user.id))
 
     chat_id = update.effective_chat.id
     current_msg_id = update.message.message_id

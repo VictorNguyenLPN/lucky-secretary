@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Ho_Chi_Minh"
     default_event_duration: int = Field(default=60, gt=0)
     confirmation_timeout_minutes: int = Field(default=15, gt=0)
+    history_max_messages: int = Field(default=6, ge=0)
+    history_ttl_minutes: int = Field(default=30, gt=0)
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./data/lucky_secretary.db"

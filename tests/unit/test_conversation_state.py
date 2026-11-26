@@ -459,3 +459,151 @@ async def test_batch_delete_all_events_in_week(repository: Repository) -> None:
     assert "<b>Events deleted successfully! (2 events)</b>" in confirm_resp.text
     assert cal_client.deleted_event_ids == ["w1", "w2"]
 
+
+async def test_short_term_history_resolves_followup_after_list_events(
+    repository: Repository,
+) -> None:
+    events = [
+        CalendarEventItem(
+            event_id="e1",
+            summary="Họp team",
+            start_datetime=datetime.fromisoformat("2026-11-26T09:00:00+07:00"),
+            end_datetime=datetime.fromisoformat("2026-11-26T10:00:00+07:00"),
+        ),
+        CalendarEventItem(
+            event_id="e2",
+            summary="Chơi cầu lông",
+            start_datetime=datetime.fromisoformat("2026-11-26T18:00:00+07:00"),
+            end_datetime=datetime.fromisoformat("2026-11-26T20:00:00+07:00"),
+        ),
+    ]
+    list_extraction = EventExtractionResult(
+        intent=UserIntent.LIST_EVENTS,
+        start_datetime_iso="2026-11-26T00:00:00+07:00",
+        end_datetime_iso="2026-11-26T23:59:59+07:00",
+        has_explicit_date=True,
+        missing_fields=[],
+    )
+    followup_update = EventExtractionResult(
+        intent=UserIntent.UPDATE_EVENT,
+        target_event_id="e2",
+        summary="Chơi cầu lông",
+        start_datetime_iso="2026-11-26T19:00:00+07:00",
+        end_datetime_iso="2026-11-26T21:00:00+07:00",
+        has_explicit_date=True,
+        has_explicit_time=True,
+        missing_fields=[],
+    )
+    service, llm, cal_client = make_conversation_service(
+        repository,
+        [list_extraction, followup_update],
+        listed_events=events,
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    list_resp = await service.handle_user_message("1001", "Ngày mai tôi có lịch gì?", now=now)
+    assert "Chơi cầu lông" in list_resp.text
+    assert len(cal_client.list_queries) == 1
+
+    followup_resp = await service.handle_user_message(
+        "1001",
+        "dời cái thứ 2 sang 19h",
+        now=now + timedelta(minutes=2),
+    )
+    assert "Recent conversation history" in llm.calls[1][1]
+    assert "e2" in llm.calls[1][1]
+    # Resolved directly from short-term history without re-querying Google Calendar.
+    assert len(cal_client.list_queries) == 1
+    assert "Update Event Preview" in followup_resp.text
+    assert "19:00 - 21:00" in followup_resp.text
+
+
+async def test_short_term_history_resolves_followup_after_confirmed_creation(
+    repository: Repository,
+) -> None:
+    create_extraction = EventExtractionResult(
+        intent=UserIntent.CREATE_EVENT,
+        summary="Họp team",
+        start_datetime_iso="2026-11-27T09:00:00+07:00",
+        has_explicit_date=True,
+        has_explicit_time=True,
+        missing_fields=[],
+    )
+    followup_update = EventExtractionResult(
+        intent=UserIntent.UPDATE_EVENT,
+        target_event_id="evt_1",
+        summary="Họp team",
+        location="Phòng 302",
+        has_explicit_date=True,
+        missing_fields=[],
+    )
+    service, llm, cal_client = make_conversation_service(
+        repository,
+        [create_extraction, followup_update],
+    )
+    now = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    preview = await service.handle_user_message("1001", "Họp team 9h ngày 27/11", now=now)
+    assert preview.reply_markup_request_id is not None
+    await service.handle_confirmation(
+        "1001",
+        preview.reply_markup_request_id,
+        confirmed=True,
+        now=now + timedelta(seconds=10),
+    )
+
+    update_preview = await service.handle_user_message(
+        "1001",
+        "thêm địa điểm Phòng 302 cho lịch vừa tạo",
+        now=now + timedelta(minutes=1),
+    )
+    assert "evt_1" in llm.calls[1][1]
+    assert "Update Event Preview" in update_preview.text
+    assert "Phòng 302" in update_preview.text
+    assert len(cal_client.list_queries) == 0
+
+
+async def test_short_term_history_ttl_expiration_and_clear_command(
+    repository: Repository,
+) -> None:
+    list_extraction = EventExtractionResult(
+        intent=UserIntent.LIST_EVENTS,
+        start_datetime_iso="2026-11-26T00:00:00+07:00",
+        end_datetime_iso="2026-11-26T23:59:59+07:00",
+        has_explicit_date=True,
+        missing_fields=[],
+    )
+    service, llm, _ = make_conversation_service(
+        repository,
+        [list_extraction, list_extraction, list_extraction],
+        listed_events=[],
+    )
+    t0 = datetime(2026, 11, 25, 11, 0, tzinfo=timezone.utc)
+
+    await service.handle_user_message("1001", "Hôm nay có lịch gì?", now=t0)
+
+    # After 31 minutes (> 30m TTL), older messages must NOT be included in prompt history.
+    await service.handle_user_message(
+        "1001",
+        "Ngày mai có lịch gì?",
+        now=t0 + timedelta(minutes=31),
+    )
+    assert "Recent conversation history" not in llm.calls[1][1]
+
+    # /clear wipes all stored chat_messages immediately even within TTL.
+    await service.handle_clear_command("1001")
+    user = await repository.get_or_create_user("1001")
+    remaining = await repository.get_recent_chat_messages(
+        user.id,
+        since=t0 - timedelta(hours=1),
+        limit=20,
+    )
+    assert remaining == []
+
+    await service.handle_user_message(
+        "1001",
+        "Ngày mai có lịch gì?",
+        now=t0 + timedelta(minutes=32),
+    )
+    assert "Recent conversation history" not in llm.calls[2][1]
+
